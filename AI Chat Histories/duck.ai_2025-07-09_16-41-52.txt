@@ -1,0 +1,138 @@
+﻿This conversation was generated with Duck.ai (https://duck.ai) using OpenAI's o4-mini Model. AI chats may display inaccurate or offensive information (see https://duckduckgo.com/duckai/privacy-terms for more info).
+
+====================
+
+User prompt 1 of 1 - 7/9/2025, 4:34:10 PM:
+I am writing a C++ plug-in for GIMP, and the version of the GIMP API I am using is 3.x, specifically the newer 3.0.4 version.  I am using Clang++ from MSYS2, and using Windows 11.  I am having difficulty with the plug-in freezing up and forcing me to kill GIMP and stop both the plug-in and GIMP from running, but only sometimes, and other times the plug-in runs fine.  What I've narrowed things down to is that while the plug-in's procedure is running and crunching data, the plug-in's GUI is still being shown, and if the mouse cursor is moved while the plug-in is crunching data and occasionally updating the GUI to show progress, the plug-in freezes up and stops responding and hangs, only if the mouse cursor by chance makes a tooltip-style popup of text appear for one of the buttons or options in the window dialog that is a button or other widget for a parameter.  I'm trying to figure out how to temporarily make the procedure ignore the mouse cursor in most or all ways for the plug-in's window, so that no "blurb" text for any parameter shows on the screen and no buttons or other widgets light-up when focused or can be focused by the mouse cursor at all, and hopefully the plug-in will not freeze or hang while processing.  Also, while crunching data the plug-in is multi-threading, using OpenMP C++ pragmas and commands, and when stuff goes on that involves the GUI it doesn't behave well if it is inside an OpenMP parallel for loop unless it is in the middle of a bunch of C++ commands that have a "pragma omp critical" covering them.  I'm not sure how to block the GUI from doing any usual stuff that the plug-in window's GUI buttons and other stuff normally do when a mouse hovers over or moves over parts of the window or any of it's widgets.  Is there any good way to "turn off" that type of thing, temporarily, and turn it back on if I want to prompt the user for any more options or stuff?
+
+o4-mini:
+With GIMP-3.x the plug-in GUI is a thin layer on GTK3/4, so almost everything you see happening “for free” (tooltips, hover effects, keyboard focus, redraws, and so on) is GTK doing its normal event‐handling work.  When you:
+
+ 1. crunch in parallel threads  
+ 2. occasionally poke the GTK UI directly from one of those threads  
+ 3. leave GTK still fully responsive to mouse “enter/leave” and tooltip queries  
+
+…you end up in exactly the situation you describe: GTK will re-enter your code (to ask “should I show a tooltip?” or to repaint, or to handle a pointer‐grab), you haven’t synchronized properly, and the two contexts deadlock or corrupt state.
+
+You have basically two orthogonal issues to solve:
+
+  A.  Never call any GTK API from a non-GTK (non-main) thread.  
+  B.  Temporarily disable the parts of your window that you don’t want GTK to touch (tooltips, hover highlights, focus, even pointer events if you like).
+
+————————————————————————————————
+
+1.  Always marshal GTK calls back to the main loop  
+————————————————
+
+In GTK3/4 you must do every single widget call in the main thread.  You cannot say “inside my OpenMP loop print a progress bar update” directly.  What you do instead is:
+
+  •  Build a small C++ (or C) function that takes your progress info and does the one GTK call  
+  •  Use g_idle_add() (or GDK’s gdk_threads_add_idle() in GTK4) to schedule that function to run in the main loop  
+  •  Return immediately from your worker thread  
+
+This means your big crunch never blocks the UI thread (so the window can repaint or handle events), and any actual GTK work only happens in the main thread.
+
+Example (C style):
+```c
+typedef struct {
+  GtkWidget *progress_bar;
+  double     fraction;
+} ProgressUpdate;
+
+static gboolean
+idle_update_progress (gpointer data)
+{
+  ProgressUpdate *u = (ProgressUpdate*) data;
+  gtk_progress_bar_set_fraction (GTK_PROGRESS_BAR(u->progress_bar),
+                                 u->fraction);
+  g_free (u);
+  return G_SOURCE_REMOVE;
+}
+
+// from your worker
+ProgressUpdate *u = g_new0 (ProgressUpdate,1);
+u->progress_bar = my_progress_bar_widget;
+u->fraction     = 0.42;
+g_idle_add (idle_update_progress, u);
+```
+
+Now you have a clean, thread-safe bridge to GTK.  You can do this for *any* GUI-touching code: enabling/disabling widgets, showing dialogs, etc.
+
+————————————————————————————————
+
+2.  Turning off tooltips / hover / focus / input events  
+————————————————
+
+Once you’ve got all GUI calls marshalled into the main thread, you can also temporarily shut off all the “interactive decoration” around your dialog.  You have several approaches:
+
+A)  Disable sensitivity on the entire dialog  
+   •  gtk_widget_set_sensitive (dialog, FALSE);  
+   •  …crunch your data (in worker threads)…  
+   •  When done, back in the main loop: gtk_widget_set_sensitive (dialog, TRUE);  
+
+   That will grey out everything, ignore mouse clicks, hover, tooltip queries, keyboard focus, etc.
+
+B)  Disable tooltips only  
+   If it’s only the little “hover text” bubbles you’re worried about:
+   •  For GTK3: gtk_widget_set_has_tooltip (widget, FALSE);  
+   •  For GTK4: connect to the “query-tooltip” signal and return TRUE (suppresses the tooltip).  
+
+   You can loop over all children of your dialog and call set_has_tooltip(FALSE) on each:
+```c
+// example for GTK3
+GList *kids = gtk_container_get_children (GTK_CONTAINER(dialog));
+for (GList *l = kids; l; l = l->next)
+{
+  gtk_widget_set_has_tooltip (GTK_WIDGET(l->data), FALSE);
+}
+g_list_free (kids);
+```
+
+C)  Grab the pointer / keyboard so no other events fall through  
+   If you want absolute control and prevent any GDK events:
+```c
+GdkSeat    *seat = gdk_display_get_default_seat (gdk_display_get_default ());
+GdkWindow  *win  = gtk_widget_get_window (dialog);
+gdk_seat_grab (seat,
+               win,
+               GDK_SEAT_CAPABILITY_ALL,
+               FALSE,      // asynchronous
+               NULL,       // cursor override
+               NULL,       // event owner
+               NULL,       // timeout
+               NULL);
+```
+   …and then when you’re done:
+```c
+gdk_seat_ungrab (seat);
+```
+   This swallows mouse & keyboard events so nothing (not even tooltips) can fire.
+
+D)  Remove enter/leave masks on the toplevel GdkWindow  
+   More low-level, but you could do:
+```c
+GdkWindow *gdk_win = gtk_widget_get_window (dialog);
+gdk_window_set_events (gdk_win, 0);
+```
+   That tells GDK to ignore *all* events on that window.  You’d want to restore the original mask afterwards if you care about normal event behavior later.
+
+————————————————————————————————
+
+Putting it all together  
+————————
+
+1.  At the start of your long operation, in the *main* thread:
+    - Disable sensitivity on the dialog (or whichever of the above strategies you pick).  
+2.  Kick off your crunch in an OpenMP parallel region.  Inside it, *do not* call GTK functions directly; instead use g_idle_add() style proxies if you need progress updates.  
+3.  When your crunch finishes, use another idle callback to re-enable sensitivity (or grab-release, or re-install the event mask).  
+
+That will give you a plug-in that:
+  •  Never deadlocks GTK by calling into it from the wrong thread  
+  •  Never responds to mouse hovers or shows tooltips while crunching  
+  •  Restores the normal interactive behavior once you’re done  
+
+—  
+TL;DR  
+1) Funnel *all* GTK calls back onto the main thread with g_idle_add() or gdk_threads_add_idle().  
+2) Call gtk_widget_set_sensitive(dialog, FALSE) (or grab the pointer, or disable tooltips) before you crunch.  
+3) When done, in another idle callback call gtk_widget_set_sensitive(dialog, TRUE).
