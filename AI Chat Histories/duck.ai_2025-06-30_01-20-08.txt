@@ -1,0 +1,340 @@
+﻿This conversation was generated with Duck.ai (https://duck.ai) using OpenAI's o4-mini Model. AI chats may display inaccurate or offensive information (see https://duckduckgo.com/duckai/privacy-terms for more info).
+
+====================
+
+User prompt 1 of 3 - 6/30/2025, 12:07:19 AM:
+gimp_procedure_find_return_value how to set value that procedure returns
+
+o4-mini:
+In GIMP’s PDB everything that a procedure “returns” is actually declared up‐front when you register the procedure with `gimp_install_procedure()` (in C) or `register()` (in Python‐fu), not something you can go and mutate later via `gimp_procedure_find_return_value()`. That function simply lets you *read* the metadata of an already‐registered procedure, not change it.
+
+The return‐values of your plugin are defined by the array of `GimpParamDef` you pass — that array is part of your call to `gimp_install_procedure()`. Here’s the typical pattern in C:
+
+```c
+#include <libgimp/gimp.h>
+
+static void
+query (void)
+{
+  static GimpParamDef args[] = {
+    { GIMP_PDB_IMAGE,     "image",    "Input image"     },
+    { GIMP_PDB_DRAWABLE,  "drawable", "Input drawable"  }
+  };
+
+  /* status code always first return */
+  static GimpParamDef return_vals[] = {
+    { GIMP_PDB_STATUS,    "status",   "Return status" },
+    { GIMP_PDB_IMAGE,     "out_image","Processed image" }  /* optional extra */
+  };
+
+  gimp_install_procedure (
+    "plug-in-myfilter",               /* Proc name */
+    "My Filter",                      /* Blurb */
+    "Does something wonderful",       /* Help */
+    "Your Name <you@domain.com>",     /* Author */
+    "Your Name",                      /* Copyright holder */
+    "2024",                           /* Date */
+    "_My Filter…",                    /* Menu label */
+    "RGB*, GRAY*",                    /* Image types */
+    GIMP_PLUGIN,                      /* Proc type */
+    G_N_ELEMENTS (args),              /* # of args */
+    G_N_ELEMENTS (return_vals),       /* # of return values */
+    args,
+    return_vals
+  );
+}
+
+static void
+run (const gchar      *name,
+     gint              nparams,
+     const GimpParam  *param,
+     gint             *nreturn_vals,
+     GimpParam       **return_vals)
+{
+  static GimpParam  values[2];
+
+  *nreturn_vals = 2;
+  *return_vals  = values;
+
+  /* always return a status */
+  values[0].type = GIMP_PDB_STATUS;
+  values[0].data.d_status = GIMP_PDB_SUCCESS;
+
+  /* then any extra return(s) in the order you declared them */
+  values[1].type = GIMP_PDB_IMAGE;
+  values[1].data.d_image = your_output_image_id;
+}
+
+GIMP_PLUGIN_DEFINE (
+  /* init_proc  */ NULL,
+  /* quit_proc  */ NULL,
+  /* query_proc */ query,
+  /* run_proc   */ run
+)
+```
+
+Key takeaways:
+
+  1. The *shape* (number and types) of return values is fixed at `gimp_install_procedure()` time.
+  2. At run‐time you fill in those slots in your `run()` function: the first slot is always a status code (`GIMP_PDB_SUCCESS` or an error), and thereafter any additional return values you declared.
+  3. You cannot go and “set” or “redefine” return slots via `gimp_procedure_find_return_value()`—that API is read‐only.
+
+If you’re writing Python‐fu it’s exactly the same idea, but you call:
+
+```python
+register(
+    "python-fu-myfilter",
+    "My Filter",
+    "Does something wonderful",
+    "Your Name",
+    "Your Name",
+    "2024",
+    "<Image>/Filters/My Filter…",
+    "RGB*, GRAY*",
+    [
+      (PF_IMAGE,    "image",    "Input image",    None),
+      (PF_DRAWABLE, "drawable", "Input drawable", None),
+    ],
+    [
+      (PF_IMAGE,    "out_image","Output image"),
+    ],
+    myfilter_func
+)
+main()
+```
+
+Here the last two lists are your argument descriptors and your return‐value descriptors. The first return you must emit is always the status code; in Python‐fu that’s handled for you under the hood (you simply return a tuple whose first element is the new image or drawable).
+
+--------------------
+
+User prompt 2 of 3 - 6/30/2025, 12:12:34 AM:
+I'm trying to write a plugin in C++, and it's for GIMP version 3.0.4, and the procedure_run() function is supposed to return a new image.  I've figured out how to make it work so far in interactive mode, but outside of interactive mode I'm trying to figure out how to take a GimpImage* that I've created and processed inside the procedure_run() and set the image the function is supposed to return to that created image, which is processed and created within that *_run() function.  How do I do this?
+
+o4-mini:
+In GIMP-3 the PDB API is really no different than it was in GIMP-2 except that everything is namespaced and uses GLib/GObject conventions.  You still declare up front (in your `gimp_procedure_new()` or your XML) that your proc returns N parameters, the first of which is always the status code and the rest of which are your “real” return values (in your case an image id).  Then in your `*_run()` implementation you allocate a small array of `GimpParam`, fill in those slots, and hand it back to GIMP.
+
+Here’s the minimal skeleton in C that shows you how to return a brand new image from your `run()`:
+
+```c
+#include <libgimp/gimp.h>
+
+static void
+query (Gimp::Procedure *proc)
+{
+  /* tell GIMP what our proc is called, what it takes, and what it returns */
+  gimp_procedure_set_buildable (proc, TRUE);  /* interactive */
+  gimp_procedure_set_menu_label (proc, "_My Filter…");
+  gimp_procedure_set_image_types (proc, "RGB*, GRAY*");
+
+  /* arguments */
+  gimp_procedure_set_n_params (proc, 2);
+  gimp_procedure_set_param_info (proc, 0,
+                                 GIMP_PARAM_TYPE_IMAGE,
+                                 "image",
+                                 "Input image");
+  gimp_procedure_set_param_info (proc, 1,
+                                 GIMP_PARAM_TYPE_DRAWABLE,
+                                 "drawable",
+                                 "Input drawable");
+
+  /* return values */
+  gimp_procedure_set_n_return_vals (proc, 2);
+  gimp_procedure_set_return_val_info (proc, 0,
+                                      GIMP_PARAM_TYPE_STATUS,
+                                      "status",
+                                      "Success or Failure");
+  gimp_procedure_set_return_val_info (proc, 1,
+                                      GIMP_PARAM_TYPE_IMAGE,
+                                      "new-image",
+                                      "The newly created image");
+
+  gimp_procedure_done (proc);
+}
+
+static GimpRunReturn
+run (Gimp::Procedure   *proc,
+     GimpRunContext    *run_context,
+     unsigned           n_params,
+     const GimpParam   *param,
+     unsigned          *n_return_vals,
+     GimpParam        **return_vals)
+{
+  GimpParam *retvals;
+  GimpImage *in_image    = gimp_image_get (param[0].data.d_image);
+  GimpDrawable *in_draw  = gimp_drawable_get (param[1].data.d_drawable);
+
+  /* --- 1) do your work here, create a new image --- */
+  GimpImage *out_image = gimp_image_new (gimp_image_get_width (in_image),
+                                         gimp_image_get_height (in_image),
+                                         gimp_image_get_base_type (in_image));
+  /* ... paint into out_image, add layers, whatever ... */
+
+  /* --- 2) allocate & fill return-value array --- */
+  *n_return_vals = 2;
+  retvals = g_new0 (GimpParam, *n_return_vals);
+
+  /* always return a status code first */
+  retvals[0].type           = GIMP_PARAM_TYPE_STATUS;
+  retvals[0].data.d_status  = GIMP_RUN_SUCCESS;
+
+  /* then any extra return values in the order you declared them */
+  retvals[1].type           = GIMP_PARAM_TYPE_IMAGE;
+  /* here you must return the *ID* of the newly created image: */
+  retvals[1].data.d_image   = gimp_image_get_id (out_image);
+
+  *return_vals = retvals;
+
+  return GIMP_RUN_SUCCESS;
+}
+
+GIMP_PLUGIN_DEFINE (
+  /* name        */ "plug-in-myfilter",
+  /* blurb       */ "My awesome filter",
+  /* help        */ "Help text for My Filter",
+  /* author      */ "Me <me@example.com>",
+  /* copyright   */ "Me 2024",
+  /* date        */ "2024",
+  /* proc_type   */ GIMP_PLUGIN,
+  /* image_types */ "",
+  /* query_proc  */ query,
+  /* run_proc    */ run
+)
+```
+
+Key points:
+
+ 1.  In `query()` you call `gimp_procedure_set_n_return_vals()` and `gimp_procedure_set_return_val_info()` to declare that you will return two parameters:  
+    • slot 0: a `GIMP_PARAM_TYPE_STATUS`.  
+    • slot 1: a `GIMP_PARAM_TYPE_IMAGE`.  
+ 2.  In `run()` you allocate an array of `GimpParam` of exactly that size, set the first element to `GIMP_RUN_SUCCESS` (or an error), and set the second to the *ID* of the `GimpImage` you created.  
+ 3.  Assign your array into `*return_vals` and set `*n_return_vals` to the array length.  
+
+That’s it.  Once you do that, scripting callers (and non-interactive PDB callers) will see your new image returned as the second return parameter.
+
+--------------------
+
+User prompt 3 of 3 - 6/30/2025, 12:53:25 AM:
+Um, I'm looking at your code examples and wondering if they are outdated, from GIMP version 2.x, which is old and used a different API.  Your example also lists 2024 as the year for your example plugin in the copyright.  I'm trying to do what I explained for the newer stuff that came out this year in 2025, like the example at: https://testing.developer.gimp.org/resource/writing-a-plug-in/tutorial-c-gui/ but the examples from the site with the newer stuff don't have an example of how to take a generated image from within the function gimp_procedure_run() and set some returned value or object of the procedure to the generated image.  In the newer version 3.x API the actual C/C++ "return" statement takes an array of only 3 values and no more generated from a function called "gimp_procedure_new_return_values()" which returns a GimpValueArray*, and your code examples have functions I don't see in the newer 3.x API.  For setting up a returned image from the Gimp procedure class, the newer, current API uses a function inside the "plugin_create_procedure()" function called "gimp_procedure_add_image_return_value()" and the "plugin_run()" function returns a "GimpValueArray*" and has the input parameters "(GimpProcedure* procedure, GimpRunMode run_mode, GimpImage* image, GimpDrawable** drawables, GimpProcedureConfig* config, gpointer run_data)" which makes the whole *_run() function for a plugin "plugin_run(GimpProcedure* procedure, GimpRunMode run_mode, GimpImage* image, GimpDrawable** drawables, GimpProcedureConfig* config, gpointer run_data)".
+
+o4-mini:
+Here’s a minimal C example targetting the new 3.x “GimpProcedure” API (as of GIMP 3.0+), showing how to:  
+  1) declare that you return an image,  
+  2) actually create a new image in your run() function,  
+  3) insert that new image’s ID into the GimpValueArray you return.
+
+```c
+#include <libgimp/gimp.h>
+
+/* forward */
+static void      plugin_init        (void);
+static GimpProcedure* plugin_create_procedure (void);
+static GimpValueArray * plugin_run  (GimpProcedure    *proc,
+                                     GimpRunMode       run_mode,
+                                     GimpImage        *in_image,
+                                     GimpDrawable    **in_drawables,
+                                     GimpProcedureConfig *config,
+                                     gpointer          run_data);
+
+/* Boiler-plate so GIMP sees us */
+GIMP_PLUGIN_ENTRY_POINT
+{
+  plugin_init ();
+  gimp_plugin_main (/* argc = */ 0,
+                    /* argv = */ NULL,
+                    plugin_create_procedure (),
+                    plugin_run);
+}
+
+/* 1) INFERENCE / REGISTRATION */
+static void
+plugin_init (void)
+{
+  /* Nothing special here for 3.x: GimpInitializer is handled for you. */
+}
+
+/* 2) CREATE AND DESCRIBE YOUR PROCEDURE */
+static GimpProcedure *
+plugin_create_procedure (void)
+{
+  GimpProcedure *proc;
+
+  proc = gimp_procedure_new ("plug-in-myfilter3",
+                             "My Filter 3.x",
+                             "Demonstrate returning a generated image",
+                             "Me <me@example.com>",
+                             "Me, 2025",
+                             "2025",
+                             GIMP_PLUGIN,
+                             /* 1 input image, plus run_mode internally: */
+                             2,  
+                             /* We will return 2 values: status + new image */
+                             2);
+
+  /* --- inputs --- */
+  gimp_procedure_add_image_arg   (proc, "in_image",    "Input image");
+  gimp_procedure_add_drawable_arg(proc, "in_drawable", "Input drawable");
+
+  /* --- return values --- */
+  gimp_procedure_add_status_return      (proc);
+  gimp_procedure_add_image_return_value (proc, "new_image",
+                                         "The newly created image");
+
+  /* --- menu placement (optional) --- */
+  gimp_procedure_add_menu_path (proc,   "<Image>/Filters/MyFilter3…");
+
+  return proc;
+}
+
+
+/* 3) RUN: make a fresh image & return it in your value array */
+static GimpValueArray *
+plugin_run (GimpProcedure    *proc,
+            GimpRunMode       run_mode,
+            GimpImage        *in_image,
+            GimpDrawable    **in_drawables,
+            GimpProcedureConfig *config,
+            gpointer          run_data)
+{
+  GimpValueArray *retvals;
+  gint32           out_image_id;
+  GimpImage       *out_image;
+
+  /* --- do your work here: create a brand-new image --- */
+  out_image = gimp_image_new (gimp_image_get_width  (in_image),
+                              gimp_image_get_height (in_image),
+                              gimp_image_get_base_type (in_image));
+
+  /* (you could add layers, paint on it, etc.) */
+
+  /* now pull its numeric ID to return */
+  out_image_id = gimp_image_get_id (out_image);
+
+  /* --- build a 2-element GimpValueArray: status + new image --- */
+  retvals = gimp_value_array_new (2);
+
+  /* slot 0: status */
+  gimp_value_array_set (retvals, 0,
+                        GIMP_PARAM_TYPE_STATUS,
+                        GIMP_RUN_SUCCESS);
+
+  /* slot 1: the newly created image ID */
+  gimp_value_array_set (retvals, 1,
+                        GIMP_PARAM_TYPE_IMAGE,
+                        out_image_id);
+
+  return retvals;
+}
+```
+
+Explanation of the key bits:
+
+• In **plugin_create_procedure()** you call  
+  – `gimp_procedure_add_status_return(proc)` to say “slot 0 is my status code.”  
+  – `gimp_procedure_add_image_return_value(proc, …)` to say “slot 1 will be an image.”
+
+• In **plugin_run()**, after you create your `GimpImage* out_image`, you do  
+  – `out_image_id = gimp_image_get_id(out_image);`  
+  – allocate a `GimpValueArray *retvals = gimp_value_array_new(2);`  
+  – fill slot 0 with `GIMP_RUN_SUCCESS`, slot 1 with your `out_image_id`.  
+
+GIMP will then hand that array back to any PDB or script caller, which sees your fresh image as the second return value.
